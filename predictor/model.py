@@ -95,20 +95,21 @@ class AttentionPool(nn.Module):
         b, d, n = x.shape
         rem = n % 2
 
+
         if rem > 0:
             x = F.pad(x, (0, rem), value=0)
-            x = torch.reshape(x, (b, d, n/2, 2))
+            x = x.view(b, d, -1, 2)
 
             mask = torch.zeros((b, 1, n), dtype=torch.bool, device=x.device)
             mask = F.pad(mask, (0, rem), value=True)
-            mask = torch.reshape(mask, (b, d, n/2, 2))
+            mask = mask.view(b, 1, -1, 2)
 
             logits = self.attn_logit(x)
             mask_value = -torch.finfo(logits.dtype).max
             logits = logits.masked_fill(mask, mask_value)
 
         else:
-            x = torch.reshape(x, (b, d, n/2, 2))
+            x = x.view(b, d, -1, 2)
             logits = self.attn_logit(x)
 
         attn = logits.softmax(dim=-1)

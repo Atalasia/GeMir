@@ -4,7 +4,7 @@ from collections import OrderedDict
 import argparse
 from datetime import datetime
 
-from autoencoder.ae_model import AE
+from autoencoder.ae_model import SequenceAutoencoder
 from predictor.model import GeMir
 
 
@@ -52,8 +52,8 @@ def conversion(seq: str):
         else:
             val = torch.tensor([0.0, 0.0, 0.0, 0.0], dtype=torch.float32)
             result.append(val)
-
-    result = torch.cat(result, dim=0)
+    
+    result = torch.stack(result, dim=0)
 
     return result
 
@@ -80,7 +80,7 @@ def encode_sequences(mirna_dict, genes_dict, device):
 
     weights_fp = "autoencoder/weight/seq_enc.pt"
 
-    model = AE()
+    model = SequenceAutoencoder("predict")
     model.load_state_dict(torch.load(weights_fp))
     model.to(device)
 
@@ -91,9 +91,8 @@ def encode_sequences(mirna_dict, genes_dict, device):
         mirna_vecs = split_and_convert_sequences(mirna)
         mirna_vecs = torch.stack(mirna_vecs, dim=0).to(device)
 
-        enc_val = model(mirna_vecs)
-        enc_mirna = torch.cat([enc_val[0],enc_val[1],enc_val[2]], dim=0)
-        enc_mirnas[mirna_id] = enc_mirna
+        enc_val = model(mirna_vecs).flatten()
+        enc_mirnas[mirna_id] = enc_val
 
     enc_genes = OrderedDict() # list of gene blocks per gene
 
@@ -102,16 +101,18 @@ def encode_sequences(mirna_dict, genes_dict, device):
         encoded_blocks = [] ## list of size 1,000 encoded blocks
         gene = pad_sequences(gene, 10000)
         gene_vecs = split_and_convert_sequences(gene) ## list of (4 x 10) tensors
+        #print(gene_vecs[0].shape)
 
         for idx in range(0, len(gene_vecs), 32):
             final_idx = min(idx + 32, len(gene_vecs))
             batch_vecs = torch.stack(gene_vecs[idx: final_idx], dim=0).to(device)
-            enc_batch = model(batch_vecs)
+            enc_batch = model(batch_vecs).flatten()
+            #print(enc_batch.shape)
 
             for enc in enc_batch:
                 buffer.append(enc)
                 if len(buffer) == 1000:
-                    enc_block = torch.cat(buffer, dim=0)
+                    enc_block = torch.tensor(buffer, dtype=torch.float32)
                     encoded_blocks.append(enc_block)
                     buffer = []
 
@@ -143,7 +144,10 @@ def parse_fasta_file(fp):
     return parsed_seqs
 
 
-def format_blocks(gene_block, pe):
+def format_blocks(gene_block, pe, i):
+
+    last_row = torch.zeros(1000, dtype=torch.float32)
+    gene_block = torch.stack([gene_block, pe[i].flatten(), last_row], dim=0) #torch.swapaxes(pe[i], 0, 1), last_row], dim=0)
 
     return gene_block
 
@@ -162,15 +166,20 @@ def predict_binding(mirnas, genes, device):
         weights_fp = "predictor/weight/gemir_%s.pt" % i
         model.load_state_dict(torch.load(weights_fp))
 
-        for mirna_id, mirna_b, gene_id, gene_bs in zip(mirnas.items(), genes.items()):
+        for (mirna_id, mirna_b), (gene_id, gene_bs) in zip(mirnas.items(), genes.items()):
 
-            gene_b = [ format_blocks(gene_b, pe) for gene_b in gene_bs ]
+            gene_b = [ format_blocks(gene_b, pe, i) for i, gene_b in enumerate(gene_bs) ]
             gene_b = torch.stack(gene_b, dim=0)
+            gene_b = gene_b.to(device)
             b_count, _, _ = gene_b.shape
+
+            #print(gene_b.shape)
 
             mirna_b = mirna_b.to(device, dtype=torch.float)
             mirna_b = mirna_b.unsqueeze(0).repeat(b_count, 1, 1)
 
+            #print(mirna_b.shape)
+            
             output = model(mirna_b, gene_b)
 
             pred = torch.where(output < 0, 0.0, output)
@@ -189,7 +198,7 @@ def predict_binding(mirnas, genes, device):
 def print_result(result_dict, outfp):
 
     outfile = open(outfp, "wt")
-    outfile.write("miRNA\tgene\tconsensus_blocks\tbinds\n")
+    outfile.write("miRNA\tgene\tblock bindability\tbinds\n")
 
     for (mirna, gene), vals in result_dict.items():
         row_count = len(vals[0])
@@ -202,16 +211,16 @@ def print_result(result_dict, outfp):
                     consensus += 1
 
             if consensus > 5:
-                bindability.append(True)
+                bindability.append("Yes")
             else:
-                bindability.append(False)
+                bindability.append("No")
 
         cblocks = ",".join([str(j) for j in bindability])
 
         if any(bindability):
-            res = "True"
+            res = "Yes"
         else:
-            res = "False"
+            res = "No"
 
         outfile.write("%s\t%s\t%s\t%s\n" % (mirna, gene, cblocks, res))
 
@@ -237,15 +246,14 @@ def parse_arguments():
 
 def main(configs):
 
-    mirna_fp = configs.MIRNA_FILE
-    gene_fp = configs.GENE_FILE
-    out_fp = configs.OUTPUT_FILE
+    mirna_fp = configs.MIRNA_FILE if configs.MIRNA_FILE is not None else 'data/mirna.fa'
+    gene_fp = configs.GENE_FILE if configs.GENE_FILE is not None else 'data/gene.fa'
+    out_fp = configs.OUTPUT_FILE if configs.OUTPUT_FILE is not None else 'results.csv'
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     mirna_fasta_dict = parse_fasta_file(mirna_fp)
     gene_fasta_dict = parse_fasta_file(gene_fp)
-
 
     start_time = datetime.now()
     print("\nStarting prediction at {}".format(start_time.strftime('%Y-%m-%d - %H:%M:%S')))
@@ -257,7 +265,6 @@ def main(configs):
     finish_time = datetime.now()
     print("\nFinished prediction at {} (took {} seconds)\n".
           format(finish_time.now().strftime('%Y-%m-%d - %H:%M:%S'), (finish_time - start_time)))
-
 
 configs = parse_arguments()
 main(configs)

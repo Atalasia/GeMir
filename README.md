@@ -12,4 +12,4 @@ Holistic prediction of miRNA and gene.
 ```
 python predict.py -m <mirna fasta file> -g <gene fasta file> -o <outfile>
 ```
-Write a pair of miRNA, gene sequences to predict if they bind or not. 
+Write a pair of miRNA, gene sequences in each fasta file to predict if the pair binds or not. 
